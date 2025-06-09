@@ -6,6 +6,8 @@
 #include "framework.h"
 #include "CfsGUI.h"
 #include "CfsGUIDlg.h"
+#include "afxdialogex.h"
+#include "RealtimePlotWnd.h" 
 
 #ifdef _DEBUG
 #define new DEBUG_NEW

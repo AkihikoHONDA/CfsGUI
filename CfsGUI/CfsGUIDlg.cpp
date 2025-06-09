@@ -1,10 +1,9 @@
-﻿// CfsGUIDlg.cpp をこの内容で完全に置き換える
-
-#include "pch.h"
+﻿#include "pch.h"
 #include "framework.h"
 #include "CfsGUI.h"
 #include "CfsGUIDlg.h"
 #include "afxdialogex.h"
+#include "RealtimePlotWnd.h"
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -20,9 +19,40 @@ CfsGUIDlg::CfsGUIDlg(CWnd* pParent /*=nullptr*/)
 	, m_portNo(5)
 	, m_pThread(nullptr)
 	, m_bIsThreadRunning(false)
+	, m_bShowRealTimePlot(false)
+	, m_plotChannelMask(0x3F)
+	, m_bufferUpdateTimer(0)
+	, m_plotUpdateTimer(0)
+	, m_dataDecimation(5)
+	, m_decimationCounter(0)
+	, m_pPlotWindow(nullptr)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
+
 	for (int i = 0; i < 6; ++i) m_Limit[i] = 0.0;
+
+	// クリティカルセクション初期化
+	InitializeCriticalSection(&m_bufferCS);
+
+	m_realtimeBuffer.clear();
+	m_tempBuffer.clear();
+}
+
+CfsGUIDlg::~CfsGUIDlg()
+{
+	// タイマー停止
+	if (m_bufferUpdateTimer) KillTimer(m_bufferUpdateTimer);
+	if (m_plotUpdateTimer) KillTimer(m_plotUpdateTimer);
+
+	// プロットウィンドウ削除
+	if (m_pPlotWindow) {
+		m_pPlotWindow->DestroyWindow();
+		delete m_pPlotWindow;
+		m_pPlotWindow = nullptr;
+	}
+
+	// クリティカルセクション削除
+	DeleteCriticalSection(&m_bufferCS);
 }
 
 void CfsGUIDlg::DoDataExchange(CDataExchange* pDX)
@@ -35,15 +65,16 @@ BEGIN_MESSAGE_MAP(CfsGUIDlg, CDialogEx)
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
 	ON_WM_DESTROY()
+	ON_WM_TIMER()
 	ON_BN_CLICKED(IDC_BUTTON_START, &CfsGUIDlg::OnBnClickedButtonStart)
 	ON_BN_CLICKED(IDC_BUTTON_STOP, &CfsGUIDlg::OnBnClickedButtonStop)
 	ON_BN_CLICKED(IDC_BUTTON_PLOT, &CfsGUIDlg::OnBnClickedButtonPlot)
+	ON_BN_CLICKED(IDC_BUTTON_RT_PLOT, &CfsGUIDlg::OnBnClickedButtonRtPlot)
 	ON_MESSAGE(WM_THREAD_FINISHED, &CfsGUIDlg::OnThreadFinished)
 END_MESSAGE_MAP()
 
 
 // CfsGUIDlg メッセージ ハンドラー
-
 BOOL CfsGUIDlg::OnInitDialog()
 {
 	CDialogEx::OnInitDialog();
@@ -67,7 +98,15 @@ BOOL CfsGUIDlg::OnInitDialog()
 
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(FALSE);
 	GetDlgItem(IDC_BUTTON_PLOT)->EnableWindow(FALSE);
-	//AddLog(_T("アプリケーションを開始します。"));
+	GetDlgItem(IDC_BUTTON_RT_PLOT)->EnableWindow(FALSE);
+
+	// プロットウィンドウ作成
+	m_pPlotWindow = new CRealtimePlotWnd();
+	if (!m_pPlotWindow->CreatePlotWindow(this)) {
+		delete m_pPlotWindow;
+		m_pPlotWindow = nullptr;
+		AddLog(_T("警告: プロットウィンドウの作成に失敗しました。"));
+	}
 
 	m_hDll = LoadLibrary(_T("CfsUsb.dll"));
 	if (m_hDll == NULL)
@@ -76,7 +115,6 @@ BOOL CfsGUIDlg::OnInitDialog()
 		GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
 		return TRUE;
 	}
-	//AddLog(_T("CfsUsb.dll をロードしました。"));
 
 	m_pInitialize = (FUNC_Initialize)GetProcAddress(m_hDll, "Initialize");
 	m_pFinalize = (FUNC_Finalize)GetProcAddress(m_hDll, "Finalize");
@@ -89,11 +127,9 @@ BOOL CfsGUIDlg::OnInitDialog()
 	m_pGetSensorInfo = (FUNC_GetSensorInfo)GetProcAddress(m_hDll, "GetSensorInfo");
 
 	m_pInitialize();
-	//AddLog(_T("DLLを初期化しました。"));
 
 	if (m_pPortOpen(m_portNo) == true)
 	{
-		//AddLog(_T("ポートをオープンしました。"));
 		AddLog(_T("センサーの準備が完了しました。計測を開始できます。"));
 		char serialNo_char[9];
 		if (m_pGetSensorInfo(m_portNo, serialNo_char) == true)
@@ -127,10 +163,21 @@ void CfsGUIDlg::OnSysCommand(UINT nID, LPARAM lParam)
 
 void CfsGUIDlg::OnPaint()
 {
-	if (IsIconic()) { /* ... */ }
+	if (IsIconic())
+	{
+		CPaintDC dc(this);
+		SendMessage(WM_ICONERASEBKGND, reinterpret_cast<WPARAM>(dc.GetSafeHdc()), 0);
+		int cxIcon = GetSystemMetrics(SM_CXICON);
+		int cyIcon = GetSystemMetrics(SM_CYICON);
+		CRect rect;
+		GetClientRect(&rect);
+		int x = (rect.Width() - cxIcon + 1) / 2;
+		int y = (rect.Height() - cyIcon + 1) / 2;
+		dc.DrawIcon(x, y, m_hIcon);
+	}
 	else
 	{
-		CDialogEx::OnPaint();
+		CDialogEx::OnPaint();  // 通常のダイアログ描画のみ
 	}
 }
 
@@ -168,14 +215,23 @@ void CfsGUIDlg::AddLog(CString str)
 
 void CfsGUIDlg::OnBnClickedButtonStart()
 {
-	//AddLog(_T("計測開始ボタンが押されました。"));
 	AddLog(_T("----------------"));
 	AddLog(_T("計測を開始しました。"));
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
 	GetDlgItem(IDC_BUTTON_STOP)->EnableWindow(TRUE);
 	GetDlgItem(IDC_BUTTON_PLOT)->EnableWindow(FALSE);
+	GetDlgItem(IDC_BUTTON_RT_PLOT)->EnableWindow(TRUE);
+
 	m_recordedData.clear();
 	m_recordedData.reserve(80000);
+
+	// リアルタイムバッファクリア
+	EnterCriticalSection(&m_bufferCS);
+	m_realtimeBuffer.clear();
+	m_tempBuffer.clear();
+	LeaveCriticalSection(&m_bufferCS);
+	m_decimationCounter = 0;
+
 	m_bIsThreadRunning = true;
 	m_pThread = AfxBeginThread(RecordThreadProc, this);
 }
@@ -184,15 +240,114 @@ void CfsGUIDlg::OnBnClickedButtonStop()
 {
 	AddLog(_T("計測終了を要求しました。"));
 	if (m_bIsThreadRunning == false) return;
+
 	m_bIsThreadRunning = false;
+
+	// リアルタイムプロット停止
+	if (m_bShowRealTimePlot) {
+		OnBnClickedButtonRtPlot(); // プロット停止
+	}
+
 	if (m_pSetSerialMode != nullptr) {
 		m_pSetSerialMode(m_portNo, false);
 	}
 }
 
+void CfsGUIDlg::OnBnClickedButtonRtPlot()
+{
+	m_bShowRealTimePlot = !m_bShowRealTimePlot;
+
+	if (m_bShowRealTimePlot) {
+		GetDlgItem(IDC_BUTTON_RT_PLOT)->SetWindowText(_T("プロット停止"));
+		AddLog(_T("リアルタイムプロットを開始しました。"));
+
+		// プロットウィンドウ表示
+		if (m_pPlotWindow) {
+			m_pPlotWindow->ShowPlotWindow(TRUE);
+		}
+
+		// タイマー開始
+		m_bufferUpdateTimer = SetTimer(1, BUFFER_UPDATE_INTERVAL, NULL);
+		m_plotUpdateTimer = SetTimer(2, PLOT_UPDATE_INTERVAL, NULL);
+
+	}
+	else {
+		GetDlgItem(IDC_BUTTON_RT_PLOT)->SetWindowText(_T("リアルタイムプロット"));
+		AddLog(_T("リアルタイムプロットを停止しました。"));
+
+		// プロットウィンドウ非表示
+		if (m_pPlotWindow) {
+			m_pPlotWindow->ShowPlotWindow(FALSE);
+		}
+
+		// タイマー停止
+		if (m_bufferUpdateTimer) {
+			KillTimer(m_bufferUpdateTimer);
+			m_bufferUpdateTimer = 0;
+		}
+		if (m_plotUpdateTimer) {
+			KillTimer(m_plotUpdateTimer);
+			m_plotUpdateTimer = 0;
+		}
+	}
+}
+
+void CfsGUIDlg::OnTimer(UINT_PTR nIDEvent)
+{
+	if (nIDEvent == m_bufferUpdateTimer) {
+		// バッファ更新
+		UpdateRealtimeBuffer();
+	}
+	else if (nIDEvent == m_plotUpdateTimer) {
+		// プロットウィンドウ更新
+		if (m_bShowRealTimePlot && m_pPlotWindow && !m_realtimeBuffer.empty()) {
+			m_pPlotWindow->UpdatePlotData(m_realtimeBuffer);
+		}
+	}
+
+	CDialogEx::OnTimer(nIDEvent);
+}
+
+void CfsGUIDlg::AddDataToTempBuffer(const SensorDataRecord& record)
+{
+	// データ間引き処理（高速化）
+	m_decimationCounter++;
+	if (m_decimationCounter < m_dataDecimation) {
+		return;
+	}
+	m_decimationCounter = 0;
+
+	// 最小限のクリティカルセクション使用
+	EnterCriticalSection(&m_bufferCS);
+	m_tempBuffer.push_back(record);
+
+	// 一時バッファのサイズ制限（メモリ使用量制御）
+	if (m_tempBuffer.size() > MAX_REALTIME_POINTS * 2) {
+		m_tempBuffer.pop_front();
+	}
+	LeaveCriticalSection(&m_bufferCS);
+}
+
+void CfsGUIDlg::UpdateRealtimeBuffer()
+{
+	EnterCriticalSection(&m_bufferCS);
+
+	// 一時バッファから表示バッファにデータを移動
+	while (!m_tempBuffer.empty()) {
+		m_realtimeBuffer.push_back(m_tempBuffer.front());
+		m_tempBuffer.pop_front();
+	}
+
+	// 表示バッファのサイズ制限
+	while (m_realtimeBuffer.size() > MAX_REALTIME_POINTS) {
+		m_realtimeBuffer.pop_front();
+	}
+
+	LeaveCriticalSection(&m_bufferCS);
+}
+
 afx_msg LRESULT CfsGUIDlg::OnThreadFinished(WPARAM wParam, LPARAM lParam)
 {
-	//AddLog(_T("スレッド終了通知を受信。データ処理を開始します..."));
 	WaitForSingleObject(m_pThread->m_hThread, INFINITE);
 
 	if (!m_recordedData.empty())
@@ -222,7 +377,6 @@ afx_msg LRESULT CfsGUIDlg::OnThreadFinished(WPARAM wParam, LPARAM lParam)
 					ofs << rec.timestamp_ms << "," << rec.Fx << "," << rec.Fy << "," << rec.Fz << "," << rec.Mx << "," << rec.My << "," << rec.Mz << std::endl;
 				}
 				ofs.close();
-				//AddLog(timestampedFilename + _T(" への書き出しが完了しました。"));
 
 				m_lastCsvPath = timestampedPath.c_str();
 				GetDlgItem(IDC_BUTTON_PLOT)->EnableWindow(TRUE);
@@ -231,7 +385,6 @@ afx_msg LRESULT CfsGUIDlg::OnThreadFinished(WPARAM wParam, LPARAM lParam)
 				CString finalMsg;
 				finalMsg.Format(_T("計測データを %s に保存しました。"), timestampedFilename);
 				AddLog(finalMsg);
-				//AddLog(_T("sensor_data.csv を最新のデータに更新しました。"));
 			}
 
 			// 統計情報表示
@@ -250,7 +403,10 @@ afx_msg LRESULT CfsGUIDlg::OnThreadFinished(WPARAM wParam, LPARAM lParam)
 				logStr.Format(_T("----------------")); AddLog(logStr);
 			}
 		}
-		catch (const std::exception& e) { /* ... */ }
+		catch (const std::exception&)
+		{
+			AddLog(_T("エラー: ファイル保存中にエラーが発生しました。"));
+		}
 	}
 
 	GetDlgItem(IDC_BUTTON_START)->EnableWindow(TRUE);
@@ -313,37 +469,49 @@ void CfsGUIDlg::OnBnClickedButtonPlot()
 		}
 		AddLog(_T("2つのグラフウィンドウを起動しました。"));
 	}
-	catch (const std::exception& e) { /* ... */ }
+	catch (const std::exception&)
+	{
+		AddLog(_T("エラー: プロット表示中にエラーが発生しました。"));
+	}
 }
 
 UINT CfsGUIDlg::RecordThreadProc(LPVOID pParam)
 {
 	CfsGUIDlg* pDlg = (CfsGUIDlg*)pParam;
 
-	//pDlg->AddLog(_T("高速記録スレッドを開始しました。"));
 	if (pDlg->m_pSetSerialMode(pDlg->m_portNo, true) == false) {
 		pDlg->m_bIsThreadRunning = false;
 	}
+
 	auto startTime = std::chrono::high_resolution_clock::now();
+
 	while (pDlg->m_bIsThreadRunning) {
 		double Data[6];
 		char Status;
 		if (pDlg->m_pGetSerialData(pDlg->m_portNo, Data, &Status) == true) {
 			SensorDataRecord record;
-			record.timestamp_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - startTime).count() / 1000.0;
+			record.timestamp_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::high_resolution_clock::now() - startTime).count() / 1000.0;
 			record.Fx = pDlg->m_Limit[0] / 10000 * Data[0];
 			record.Fy = pDlg->m_Limit[1] / 10000 * Data[1];
 			record.Fz = pDlg->m_Limit[2] / 10000 * Data[2];
 			record.Mx = pDlg->m_Limit[3] / 10000 * Data[3];
 			record.My = pDlg->m_Limit[4] / 10000 * Data[4];
 			record.Mz = pDlg->m_Limit[5] / 10000 * Data[5];
+
+			// 従来のデータ記録（高優先度）
 			pDlg->m_recordedData.push_back(record);
+
+			// リアルタイム表示用データ追加（最小オーバーヘッド）
+			if (pDlg->m_bShowRealTimePlot) {
+				pDlg->AddDataToTempBuffer(record);
+			}
 		}
 	}
+
 	if (pDlg->m_pSetSerialMode != nullptr) {
 		pDlg->m_pSetSerialMode(pDlg->m_portNo, false);
 	}
-	//pDlg->AddLog(_T("高速記録スレッドが正常に終了しました。"));
 	pDlg->PostMessage(WM_THREAD_FINISHED);
 	return 0;
 }

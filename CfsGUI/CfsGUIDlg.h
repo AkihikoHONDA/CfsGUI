@@ -1,29 +1,23 @@
 ﻿#pragma once
+
+#ifndef __AFXWIN_H__
+#error "PCH に対してこのファイルをインクルードする前に 'pch.h' をインクルードしてください"
+#endif
+
+#include "resource.h"		// メイン シンボル
+#include "SensorDataTypes.h" // 共通データ型定義（追加）
 #include "CfsUsb.h"
 #include <vector>
+#include <deque>
 
-#define WM_THREAD_FINISHED (WM_APP + 1)
-
-typedef void (CALLBACK* FUNC_Initialize)();
-typedef void (CALLBACK* FUNC_Finalize)();
-typedef bool (CALLBACK* FUNC_PortOpen)(int);
-typedef void (CALLBACK* FUNC_PortClose)(int);
-typedef bool (CALLBACK* FUNC_SetSerialMode)(int, bool);
-typedef bool (CALLBACK* FUNC_GetSerialData)(int, double*, char*);
-typedef bool (CALLBACK* FUNC_GetLatestData)(int, double*, char*);
-typedef bool (CALLBACK* FUNC_GetSensorLimit)(int, double*);
-typedef bool (CALLBACK* FUNC_GetSensorInfo)(int, char*);
-
-struct SensorDataRecord
-{
-	double timestamp_ms;
-	double Fx, Fy, Fz, Mx, My, Mz;
-};
+// 前方宣言
+class CRealtimePlotWnd;
 
 class CfsGUIDlg : public CDialogEx
 {
 public:
 	CfsGUIDlg(CWnd* pParent = nullptr);
+	virtual ~CfsGUIDlg();
 
 #ifdef AFX_DESIGN_TIME
 	enum { IDD = IDD_CFSGUI_DIALOG };
@@ -40,12 +34,14 @@ protected:
 	afx_msg HCURSOR OnQueryDragIcon();
 	afx_msg void OnDestroy();
 	afx_msg LRESULT OnThreadFinished(WPARAM wParam, LPARAM lParam);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	DECLARE_MESSAGE_MAP()
 
 public:
 	afx_msg void OnBnClickedButtonStart();
 	afx_msg void OnBnClickedButtonStop();
 	afx_msg void OnBnClickedButtonPlot();
+	afx_msg void OnBnClickedButtonRtPlot();
 
 	HMODULE m_hDll;
 	FUNC_Initialize m_pInitialize;
@@ -68,4 +64,29 @@ public:
 
 	void AddLog(CString str);
 	static UINT RecordThreadProc(LPVOID pParam);
+
+private:
+	// リアルタイムプロット用
+	std::deque<SensorDataRecord> m_realtimeBuffer;
+	std::deque<SensorDataRecord> m_tempBuffer;
+	CRITICAL_SECTION m_bufferCS;
+
+	static const int MAX_REALTIME_POINTS = 500;
+	static const int BUFFER_UPDATE_INTERVAL = 50;
+	static const int PLOT_UPDATE_INTERVAL = 100;
+
+	bool m_bShowRealTimePlot;
+	int m_plotChannelMask;
+
+	UINT_PTR m_bufferUpdateTimer;
+	UINT_PTR m_plotUpdateTimer;
+
+	int m_dataDecimation;
+	int m_decimationCounter;
+
+	CRealtimePlotWnd* m_pPlotWindow;
+
+public:
+	void AddDataToTempBuffer(const SensorDataRecord& record);
+	void UpdateRealtimeBuffer();
 };
