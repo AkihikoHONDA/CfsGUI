@@ -1,0 +1,32 @@
+# Visual Studio C++ template
+
+# User-specific files
+*.suo
+*.user
+*.user.props
+*.vcxproj.user
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+
+# Our generated files
+output/
+
+# Other
+*.ilk
+*.aps
+*.pch
+*.pdb
+*.tlog
+*.log
+*.vs
+.vs/
