@@ -25,7 +25,8 @@ CfsGUIDlg::CfsGUIDlg(CWnd* pParent /*=nullptr*/)
 	, m_plotUpdateTimer(0)
 	, m_dataDecimation(5)
 	, m_decimationCounter(0)
-	, m_pPlotWindow(nullptr)
+	, m_pForceWindow(nullptr) 
+	, m_pMomentWindow(nullptr)
 {
 	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
 
@@ -45,10 +46,16 @@ CfsGUIDlg::~CfsGUIDlg()
 	if (m_plotUpdateTimer) KillTimer(m_plotUpdateTimer);
 
 	// プロットウィンドウ削除
-	if (m_pPlotWindow) {
-		m_pPlotWindow->DestroyWindow();
-		delete m_pPlotWindow;
-		m_pPlotWindow = nullptr;
+	if (m_pForceWindow) {
+		m_pForceWindow->DestroyWindow();
+		delete m_pForceWindow;
+		m_pForceWindow = nullptr;
+	}
+
+	if (m_pMomentWindow) {
+		m_pMomentWindow->DestroyWindow();
+		delete m_pMomentWindow;
+		m_pMomentWindow = nullptr;
 	}
 
 	// クリティカルセクション削除
@@ -101,11 +108,34 @@ BOOL CfsGUIDlg::OnInitDialog()
 	GetDlgItem(IDC_BUTTON_RT_PLOT)->EnableWindow(FALSE);
 
 	// プロットウィンドウ作成
-	m_pPlotWindow = new CRealtimePlotWnd();
-	if (!m_pPlotWindow->CreatePlotWindow(this)) {
-		delete m_pPlotWindow;
-		m_pPlotWindow = nullptr;
-		AddLog(_T("警告: プロットウィンドウの作成に失敗しました。"));
+	m_pForceWindow = new CRealtimePlotWnd();
+	if (!m_pForceWindow->CreatePlotWindow(this)) {
+		delete m_pForceWindow;
+		m_pForceWindow = nullptr;
+		AddLog(_T("警告: 力プロットウィンドウの作成に失敗しました。"));
+	}
+	else {
+		// 力のみ表示（Fx, Fy, Fz = ビット0,1,2）
+		m_pForceWindow->SetChannelMask(0x07);  // 0000 0111
+		m_pForceWindow->SetWindowTitle(_T("リアルタイム力データ (Fx, Fy, Fz)"));
+		m_pForceWindow->SetAxisLabels(_T("力 (N)"), _T("時間 (秒)"));
+	}
+
+	// モーメント専用プロットウィンドウ作成
+	m_pMomentWindow = new CRealtimePlotWnd();
+	if (!m_pMomentWindow->CreatePlotWindow(this)) {
+		delete m_pMomentWindow;
+		m_pMomentWindow = nullptr;
+		AddLog(_T("警告: モーメントプロットウィンドウの作成に失敗しました。"));
+	}
+	else {
+		// モーメントのみ表示（Mx, My, Mz = ビット3,4,5）
+		m_pMomentWindow->SetChannelMask(0x38);  // 0011 1000
+		m_pMomentWindow->SetWindowTitle(_T("リアルタイムモーメントデータ (Mx, My, Mz)"));
+		m_pMomentWindow->SetAxisLabels(_T("モーメント (Nm)"), _T("時間 (秒)"));
+
+		// モーメントウィンドウの位置を右にずらす
+		m_pMomentWindow->OffsetWindowPosition(50, 50);
 	}
 
 	m_hDll = LoadLibrary(_T("CfsUsb.dll"));
@@ -253,17 +283,21 @@ void CfsGUIDlg::OnBnClickedButtonStop()
 	}
 }
 
+
 void CfsGUIDlg::OnBnClickedButtonRtPlot()
 {
 	m_bShowRealTimePlot = !m_bShowRealTimePlot;
 
 	if (m_bShowRealTimePlot) {
 		GetDlgItem(IDC_BUTTON_RT_PLOT)->SetWindowText(_T("プロット停止"));
-		AddLog(_T("リアルタイムプロットを開始しました。"));
+		AddLog(_T("力・モーメントのリアルタイムプロットを開始しました。"));
 
-		// プロットウィンドウ表示
-		if (m_pPlotWindow) {
-			m_pPlotWindow->ShowPlotWindow(TRUE);
+		// 両方のプロットウィンドウを表示
+		if (m_pForceWindow) {
+			m_pForceWindow->ShowPlotWindow(TRUE);
+		}
+		if (m_pMomentWindow) {
+			m_pMomentWindow->ShowPlotWindow(TRUE);
 		}
 
 		// タイマー開始
@@ -273,11 +307,14 @@ void CfsGUIDlg::OnBnClickedButtonRtPlot()
 	}
 	else {
 		GetDlgItem(IDC_BUTTON_RT_PLOT)->SetWindowText(_T("リアルタイムプロット"));
-		AddLog(_T("リアルタイムプロットを停止しました。"));
+		AddLog(_T("力・モーメントのリアルタイムプロットを停止しました。"));
 
-		// プロットウィンドウ非表示
-		if (m_pPlotWindow) {
-			m_pPlotWindow->ShowPlotWindow(FALSE);
+		// 両方のプロットウィンドウを非表示
+		if (m_pForceWindow) {
+			m_pForceWindow->ShowPlotWindow(FALSE);
+		}
+		if (m_pMomentWindow) {
+			m_pMomentWindow->ShowPlotWindow(FALSE);
 		}
 
 		// タイマー停止
@@ -294,14 +331,24 @@ void CfsGUIDlg::OnBnClickedButtonRtPlot()
 
 void CfsGUIDlg::OnTimer(UINT_PTR nIDEvent)
 {
+	if (nIDEvent == 998) {
+		KillTimer(998);
+		AdjustControlsAfterResize();
+		return;
+	}
+
 	if (nIDEvent == m_bufferUpdateTimer) {
-		// バッファ更新
 		UpdateRealtimeBuffer();
 	}
 	else if (nIDEvent == m_plotUpdateTimer) {
-		// プロットウィンドウ更新
-		if (m_bShowRealTimePlot && m_pPlotWindow && !m_realtimeBuffer.empty()) {
-			m_pPlotWindow->UpdatePlotData(m_realtimeBuffer);
+		// 両方のウィンドウを更新
+		if (m_bShowRealTimePlot && !m_realtimeBuffer.empty()) {
+			if (m_pForceWindow) {
+				m_pForceWindow->UpdatePlotData(m_realtimeBuffer);
+			}
+			if (m_pMomentWindow) {
+				m_pMomentWindow->UpdatePlotData(m_realtimeBuffer);
+			}
 		}
 	}
 
@@ -310,22 +357,95 @@ void CfsGUIDlg::OnTimer(UINT_PTR nIDEvent)
 
 void CfsGUIDlg::AddDataToTempBuffer(const SensorDataRecord& record)
 {
-	// データ間引き処理（高速化）
+	// リアルタイムプロットが表示されている場合のみデータ追加
+	if (!m_bShowRealTimePlot) {
+		return;
+	}
+
 	m_decimationCounter++;
 	if (m_decimationCounter < m_dataDecimation) {
 		return;
 	}
 	m_decimationCounter = 0;
 
-	// 最小限のクリティカルセクション使用
 	EnterCriticalSection(&m_bufferCS);
 	m_tempBuffer.push_back(record);
 
-	// 一時バッファのサイズ制限（メモリ使用量制御）
 	if (m_tempBuffer.size() > MAX_REALTIME_POINTS * 2) {
 		m_tempBuffer.pop_front();
 	}
 	LeaveCriticalSection(&m_bufferCS);
+}
+
+void CfsGUIDlg::AdjustControlsAfterResize()
+{
+	CRect clientRect;
+	GetClientRect(&clientRect);
+
+	// 4つのボタンのポインタを取得（元に戻す）
+	CWnd* buttons[4] = {
+		GetDlgItem(IDC_BUTTON_START),
+		GetDlgItem(IDC_BUTTON_STOP),
+		GetDlgItem(IDC_BUTTON_PLOT),
+		GetDlgItem(IDC_BUTTON_RT_PLOT)
+	};
+
+	// ボタンが存在するかチェック
+	bool allButtonsExist = true;
+	for (int i = 0; i < 4; i++) {
+		if (!buttons[i] || !IsWindow(buttons[i]->GetSafeHwnd())) {
+			allButtonsExist = false;
+			break;
+		}
+	}
+
+	if (allButtonsExist) {
+		// 1行レイアウト（元に戻す）
+		const int BUTTON_WIDTH = 110;
+		const int BUTTON_HEIGHT = 30;
+		const int BUTTON_MARGIN = 10;
+		const int TOP_MARGIN = 15;
+		const int LEFT_MARGIN = 15;
+
+		// 利用可能幅を計算
+		int availableWidth = clientRect.Width() - (LEFT_MARGIN * 2);
+		int totalButtonWidth = (BUTTON_WIDTH * 4) + (BUTTON_MARGIN * 3);
+
+		// ボタンが収まらない場合は幅を調整
+		int buttonWidth = BUTTON_WIDTH;
+		if (totalButtonWidth > availableWidth) {
+			int newButtonWidth = (availableWidth - (BUTTON_MARGIN * 3)) / 4;
+			if (newButtonWidth > 80) { // 最小幅を確保
+				buttonWidth = newButtonWidth;
+			}
+		}
+
+		// ボタンを横一列に配置
+		int currentX = LEFT_MARGIN;
+		int buttonY = TOP_MARGIN;
+
+		for (int i = 0; i < 4; i++) {
+			int width = (i == 3) ? buttonWidth + 20 : buttonWidth; // 最後のボタンは少し広く
+			buttons[i]->MoveWindow(currentX, buttonY, width, BUTTON_HEIGHT);
+			currentX += width + BUTTON_MARGIN;
+		}
+
+		// ログエディットボックス調整
+		CWnd* pLogEdit = GetDlgItem(IDC_EDIT_LOG);
+		if (pLogEdit && IsWindow(pLogEdit->GetSafeHwnd())) {
+			int logTop = buttonY + BUTTON_HEIGHT + BUTTON_MARGIN;
+			int logBottom = clientRect.bottom - LEFT_MARGIN;
+			int logRight = clientRect.right - LEFT_MARGIN;
+
+			if (logBottom > logTop && logRight > LEFT_MARGIN) {
+				pLogEdit->MoveWindow(LEFT_MARGIN, logTop,
+					logRight - LEFT_MARGIN,
+					logBottom - logTop);
+			}
+		}
+	}
+
+	Invalidate();
 }
 
 void CfsGUIDlg::UpdateRealtimeBuffer()

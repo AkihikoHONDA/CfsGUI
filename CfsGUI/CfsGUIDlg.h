@@ -10,6 +10,8 @@
 #include <vector>
 #include <deque>
 
+#define WM_RESIZE_DIALOG (WM_USER + 100)
+
 // 前方宣言
 class CRealtimePlotWnd;
 
@@ -42,6 +44,8 @@ public:
 	afx_msg void OnBnClickedButtonStop();
 	afx_msg void OnBnClickedButtonPlot();
 	afx_msg void OnBnClickedButtonRtPlot();
+	afx_msg LRESULT OnResizeDialog(WPARAM wParam, LPARAM lParam);
+	void AdjustControlsAfterResize();
 
 	HMODULE m_hDll;
 	FUNC_Initialize m_pInitialize;
@@ -84,7 +88,9 @@ private:
 	int m_dataDecimation;
 	int m_decimationCounter;
 
-	CRealtimePlotWnd* m_pPlotWindow;
+	CRealtimePlotWnd* m_pForceWindow;      // 力専用ウィンドウ
+	CRealtimePlotWnd* m_pMomentWindow;     // モーメント専用ウィンドウ
+
 
 public:
 	void AddDataToTempBuffer(const SensorDataRecord& record);

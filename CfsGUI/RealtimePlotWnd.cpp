@@ -29,6 +29,10 @@ CRealtimePlotWnd::CRealtimePlotWnd()
     , m_bAutoScale(true)
     , m_manualMinVal(-100.0)
     , m_manualMaxVal(100.0)
+    , m_windowTitle(_T("リアルタイムセンサデータ"))  // 追加
+    , m_yAxisLabel(_T("力/モーメント"))              // 追加
+    , m_xAxisLabel(_T("時間 (秒)"))                  // 追加
+    , m_windowOffset(0, 0)
 {
 }
 
@@ -36,9 +40,31 @@ CRealtimePlotWnd::~CRealtimePlotWnd()
 {
 }
 
+void CRealtimePlotWnd::SetWindowTitle(const CString& title)
+{
+    m_windowTitle = title;
+    if (IsWindow(GetSafeHwnd())) {
+        SetWindowText(title);
+    }
+}
+
+void CRealtimePlotWnd::SetAxisLabels(const CString& yLabel, const CString& xLabel)
+{
+    m_yAxisLabel = yLabel;
+    m_xAxisLabel = xLabel;
+    if (IsWindowVisible()) {
+        Invalidate();
+    }
+}
+
+void CRealtimePlotWnd::OffsetWindowPosition(int offsetX, int offsetY)
+{
+    m_windowOffset.x = offsetX;
+    m_windowOffset.y = offsetY;
+}
+
 BOOL CRealtimePlotWnd::CreatePlotWindow(CWnd* pParent)
 {
-    // ウィンドウクラス登録
     CString className = AfxRegisterWndClass(
         CS_HREDRAW | CS_VREDRAW,
         LoadCursor(NULL, IDC_ARROW),
@@ -46,13 +72,14 @@ BOOL CRealtimePlotWnd::CreatePlotWindow(CWnd* pParent)
         LoadIcon(NULL, IDI_APPLICATION)
     );
 
-    // ウィンドウ作成
-    CRect rect(100, 100, 900, 700);  // 800x600サイズ
+    // ウィンドウサイズと位置（オフセット対応）
+    CRect rect(100 + m_windowOffset.x, 100 + m_windowOffset.y,
+        900 + m_windowOffset.x, 700 + m_windowOffset.y);
 
     BOOL result = CreateEx(
         WS_EX_TOOLWINDOW,
         className,
-        _T("リアルタイムセンサデータ - 6軸力覚センサ"),
+        m_windowTitle,  // 設定されたタイトルを使用
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         rect,
         pParent,
@@ -146,7 +173,7 @@ void CRealtimePlotWnd::DrawPlot(CDC* pDC, CRect rect)
     double minVal = 1e10, maxVal = -1e10;
 
     if (m_bAutoScale) {
-        // 自動スケーリング
+        // 自動スケーリング（表示対象チャンネルのみ）
         for (const auto& record : m_plotData) {
             double values[6] = { record.Fx, record.Fy, record.Fz, record.Mx, record.My, record.Mz };
             for (int i = 0; i < 6; ++i) {
@@ -158,12 +185,17 @@ void CRealtimePlotWnd::DrawPlot(CDC* pDC, CRect rect)
         }
 
         // 範囲に余裕を持たせる
-        double margin = (maxVal - minVal) * 0.1;
-        minVal -= margin;
-        maxVal += margin;
+        if (minVal < 1e9) {  // 有効なデータがある場合
+            double margin = (maxVal - minVal) * 0.1;
+            minVal -= margin;
+            maxVal += margin;
+        }
+        else {
+            minVal = -1.0;
+            maxVal = 1.0;
+        }
     }
     else {
-        // 手動スケーリング
         minVal = m_manualMinVal;
         maxVal = m_manualMaxVal;
     }
@@ -176,7 +208,7 @@ void CRealtimePlotWnd::DrawPlot(CDC* pDC, CRect rect)
     // 軸描画
     DrawAxes(pDC, plotRect, minVal, maxVal, minTime, maxTime);
 
-    // データ線描画
+    // データ線描画（表示対象チャンネルのみ）
     for (int channel = 0; channel < 6; ++channel) {
         if (!(m_plotChannelMask & (1 << channel))) continue;
 
@@ -209,7 +241,7 @@ void CRealtimePlotWnd::DrawPlot(CDC* pDC, CRect rect)
     // 凡例描画
     DrawLegend(pDC, rect);
 
-    // タイトル描画
+    // タイトル描画（カスタマイズ対応）
     pDC->SetTextColor(RGB(0, 0, 0));
     pDC->SetBkMode(TRANSPARENT);
     CFont titleFont;
@@ -218,11 +250,12 @@ void CRealtimePlotWnd::DrawPlot(CDC* pDC, CRect rect)
 
     CRect titleRect = rect;
     titleRect.bottom = titleRect.top + 30;
-    pDC->DrawText(_T("リアルタイム6軸力覚センサデータ"), &titleRect,
+    pDC->DrawText(m_windowTitle, &titleRect,
         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     pDC->SelectObject(pOldFont);
 }
+
 
 void CRealtimePlotWnd::DrawGrid(CDC* pDC, CRect rect, double minVal, double maxVal, double minTime, double maxTime)
 {
@@ -267,7 +300,7 @@ void CRealtimePlotWnd::DrawAxes(CDC* pDC, CRect rect, double minVal, double maxV
     axisFont.CreatePointFont(90, _T("Arial"));
     CFont* pOldFont = pDC->SelectObject(&axisFont);
 
-    // Y軸ラベル
+    // Y軸ラベル（値）
     int numYLabels = 5;
     for (int i = 0; i <= numYLabels; ++i) {
         double value = minVal + (maxVal - minVal) * i / numYLabels;
@@ -280,35 +313,52 @@ void CRealtimePlotWnd::DrawAxes(CDC* pDC, CRect rect, double minVal, double maxV
         pDC->DrawText(label, &labelRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
 
-    // X軸ラベル
+    // X軸ラベル（時間）
     int numXLabels = 6;
     for (int i = 0; i <= numXLabels; ++i) {
         double time = minTime + (maxTime - minTime) * i / numXLabels;
         int x = rect.left + (rect.Width() * i) / numXLabels;
 
         CString label;
-        label.Format(_T("%.1f"), time / 1000.0);
+        label.Format(_T("%.1f"), time / 1000.0);  // 秒単位
 
         CRect labelRect(x - 30, rect.bottom + 5, x + 30, rect.bottom + 25);
         pDC->DrawText(label, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    // 軸タイトル
+    // Y軸タイトル（カスタムラベル使用）
+    CFont axisTitleFont;
+    axisTitleFont.CreatePointFont(100, _T("Arial"));
+    CFont* pOldTitleFont = pDC->SelectObject(&axisTitleFont);
+
     CRect yAxisTitle(rect.left - 45, rect.top, rect.left - 25, rect.bottom);
-    pDC->DrawText(_T("力/モーメント"), &yAxisTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    pDC->DrawText(m_yAxisLabel, &yAxisTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+    // X軸タイトル（カスタムラベル使用）
     CRect xAxisTitle(rect.left, rect.bottom + 30, rect.right, rect.bottom + 50);
-    pDC->DrawText(_T("時間 (秒)"), &xAxisTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    pDC->DrawText(m_xAxisLabel, &xAxisTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+    pDC->SelectObject(pOldTitleFont);
     pDC->SelectObject(pOldFont);
 }
 
 void CRealtimePlotWnd::DrawLegend(CDC* pDC, CRect rect)
 {
+    // 表示するチャンネル数をカウント
+    int visibleChannels = 0;
+    for (int i = 0; i < 6; ++i) {
+        if (m_plotChannelMask & (1 << i)) {
+            visibleChannels++;
+        }
+    }
+
+    if (visibleChannels == 0) return;
+
+    // 凡例サイズを動的調整
     CRect legendRect = rect;
-    legendRect.left = legendRect.right - 70;
+    legendRect.left = legendRect.right - 80;
     legendRect.top += 50;
-    legendRect.bottom = legendRect.top + 150;
+    legendRect.bottom = legendRect.top + (visibleChannels * 20) + 20;
 
     // 凡例背景
     CBrush legendBrush(RGB(245, 245, 245));

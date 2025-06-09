@@ -20,6 +20,10 @@ public:
     // ウィンドウ表示/非表示
     void ShowPlotWindow(BOOL bShow);
 
+    void SetWindowTitle(const CString& title);
+    void SetAxisLabels(const CString& yLabel, const CString& xLabel);
+    void OffsetWindowPosition(int offsetX, int offsetY);
+
 protected:
     afx_msg void OnPaint();
     afx_msg void OnClose();
@@ -35,6 +39,11 @@ private:
     int m_plotChannelMask;
     bool m_bAutoScale;
     double m_manualMinVal, m_manualMaxVal;
+
+    CString m_windowTitle;
+    CString m_yAxisLabel;
+    CString m_xAxisLabel;
+    CPoint m_windowOffset;
 
     // 描画関連
     void DrawPlot(CDC* pDC, CRect rect);
